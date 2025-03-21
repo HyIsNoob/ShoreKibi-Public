@@ -1,0 +1,13 @@
+discord.py
+dropbox
+python-dotenv
+requests
+spotipy
+yt-dlp
+gtts
+deep-translator
+google-api-python-client
+PyNaCl
+google-auth-httplib2
+google-auth-oauthlib
+aiohttp
