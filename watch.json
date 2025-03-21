@@ -1,0 +1,16 @@
+{
+  "install": {
+    "include": [
+      "^package\\.json$",
+      "^requirements\\.txt$"
+    ],
+    "exclude": []
+  },
+  "restart": {
+    "include": [
+      "^main\\.py$",
+      "^server\\.py$"
+    ]
+  },
+  "throttle": 1000
+}

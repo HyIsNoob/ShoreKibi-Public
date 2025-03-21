@@ -9,12 +9,24 @@ from dropbox.exceptions import ApiError
 from datetime import datetime, timedelta
 import asyncio
 from gtts import gTTS
-from config import BOT_TOKEN, DROPBOX_APP_KEY, DROPBOX_APP_SECRET, DROPBOX_REFRESH_TOKEN, YOUTUBE_API_KEY, SPOTIFY_CLIENT_ID, SPOTIFY_CLIENT_SECRET
+from server import keep_alive
+import os
 import random
 import time
 from deep_translator import GoogleTranslator
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
+
+BOT_TOKEN = os.environ.get('BOT_TOKEN')
+DROPBOX_APP_KEY = os.environ.get('DROPBOX_APP_KEY')
+DROPBOX_APP_SECRET = os.environ.get('DROPBOX_APP_SECRET') 
+DROPBOX_REFRESH_TOKEN = os.environ.get('DROPBOX_REFRESH_TOKEN')
+YOUTUBE_API_KEY = os.environ.get('YOUTUBE_API_KEY')
+SPOTIFY_CLIENT_ID = os.environ.get('SPOTIFY_CLIENT_ID')
+SPOTIFY_CLIENT_SECRET = os.environ.get('SPOTIFY_CLIENT_SECRET')
+
+if not BOT_TOKEN:
+    raise ValueError("BOT_TOKEN không được cấu hình trong biến môi trường!")
 
 rate_limits = {} 
 _dropbox_client = None
@@ -56,6 +68,10 @@ intents.message_content = True
 intents.voice_states = True
 intents.presences = True  
 bot = commands.Bot(command_prefix="!", intents=intents)
+bot.youtube_api_enabled = youtube_api_enabled
+bot.dropbox_enabled = dropbox_enabled
+bot.spotify_enabled = spotify_enabled
+bot.custom_data = {}  # Khởi tạo custom_data để tránh lỗi
 
 # Tải custom_data từ file nếu có
 if os.path.exists('custom_data.json'):
@@ -2064,16 +2080,16 @@ async def backupstatus(interaction: discord.Interaction):
     """Hiển thị thống kê về các file đã backup"""
     guild_id = str(interaction.guild.id)
     
+    # Kiểm tra Dropbox API đã cấu hình chưa
+    if not dropbox_enabled:
+        await interaction.response.send_message("❌ Tính năng backup chưa được cấu hình. Liên hệ admin để thiết lập Dropbox API.", ephemeral=True)
+        return
+    
     await interaction.response.defer(ephemeral=False)
     
     try:
         # Kết nối Dropbox
-        dbx = dropbox.Dropbox(
-            oauth2_refresh_token=DROPBOX_REFRESH_TOKEN,
-            app_key=DROPBOX_APP_KEY,
-            app_secret=DROPBOX_APP_SECRET
-        )
-        
+        dbx = get_dropbox_client()
         # Lấy danh sách tất cả các thư mục backup
         result = dbx.files_list_folder('')
         folders = [entry.name for entry in result.entries if isinstance(entry, dropbox.files.FolderMetadata)]
@@ -2168,13 +2184,17 @@ async def backupstatus(interaction: discord.Interaction):
 def get_dropbox_client():
     """Lấy hoặc tạo client Dropbox một lần duy nhất"""
     global _dropbox_client
+    
+    if not dropbox_enabled:
+        raise ValueError("Dropbox API chưa được cấu hình trong biến môi trường!")
+    
     if _dropbox_client is None:
         _dropbox_client = dropbox.Dropbox(
             oauth2_refresh_token=DROPBOX_REFRESH_TOKEN,
             app_key=DROPBOX_APP_KEY,
             app_secret=DROPBOX_APP_SECRET
         )
-    return _dropbox_client
+    return _dropbox_clientt
 
 def format_size(size_bytes):
     """Format file size in bytes to human-readable format"""
@@ -2189,6 +2209,11 @@ def format_size(size_bytes):
 
 @bot.tree.command(name="backupall", description="Backup toàn bộ file ảnh/video của channel")
 async def backupall(interaction: discord.Interaction, from_timestamp: str = None):
+    # Kiểm tra Dropbox API đã cấu hình chưa
+    if not dropbox_enabled:
+        await interaction.response.send_message("❌ Tính năng backup chưa được cấu hình. Liên hệ admin để thiết lập Dropbox API.", ephemeral=True)
+        return
+        
     channel = interaction.channel
     view = ConfirmBackupView()
     await interaction.response.send_message("Cậu có chắc chắn muốn Shore backup toàn bộ file không? Nếu backup từ thời điểm cụ thể, nhập theo định dạng `YYYY-MM-DD HH:MM`.", view=view, ephemeral=True)
@@ -3164,18 +3189,19 @@ def get_spotify_type_and_id(url):
     return None, None
 
 # Initialize Spotify client
-try:
-    from config import SPOTIFY_CLIENT_ID, SPOTIFY_CLIENT_SECRET
-    spotify_client = spotipy.Spotify(
-        client_credentials_manager=SpotifyClientCredentials(
-            client_id=SPOTIFY_CLIENT_ID,
-            client_secret=SPOTIFY_CLIENT_SECRET
+spotify_client = None
+if spotify_enabled:
+    try:
+        spotify_client = spotipy.Spotify(
+            client_credentials_manager=SpotifyClientCredentials(
+                client_id=SPOTIFY_CLIENT_ID,
+                client_secret=SPOTIFY_CLIENT_SECRET
+            )
         )
-    )
-    spotify_enabled = True
-except (ImportError, NameError):
-    spotify_enabled = False
-    print("Spotify credentials not found. Spotify support disabled.")
+        print("Spotify client initialized successfully")
+    except Exception as e:
+        spotify_enabled = False
+        print(f"Error initializing Spotify client: {e}")
 
 # Add these global dictionaries after your other global dictionaries
 music_queues = {}  # {guild_id: [song1, song2, ...]}
@@ -5480,15 +5506,37 @@ async def check_rate_limit(command_name, user_id, cooldown=3.0):
     rate_limits[command_name][user_id] = now
     return True
 
+async def cleanup_temp_files():
+    while True:
+        try:
+            # Xóa file tạm thời cũ hơn 1 giờ
+            now = time.time()
+            for file in os.listdir("temp"):
+                file_path = os.path.join("temp", file)
+                if os.path.isfile(file_path) and now - os.path.getctime(file_path) > 3600:
+                    try:
+                        os.remove(file_path)
+                    except:
+                        pass
+        except Exception as e:
+            print(f"Lỗi dọn dẹp: {e}")
+        
+        await asyncio.sleep(3600)   
+  
 @bot.event
 async def on_ready():
     await bot.wait_until_ready()
     load_music_queues()
+    print(f'{bot.user.name} đã sẵn sàng!')
+    os.makedirs("temp", exist_ok=True)
+    
     for plan_id, plan_data in plans.items():
         view = PlanView(plan_id=plan_id)
+        
         if "voters" in plan_data:
             view.voters = set(plan_data["voters"])
         bot.add_view(view)
+        
         if "event_time" in plan_data and "channel_id" in plan_data:
             try:
                 event_dt = datetime.fromisoformat(plan_data["event_time"])
@@ -5497,6 +5545,20 @@ async def on_ready():
             except (ValueError, TypeError):
                 print(f"Invalid date format for plan {plan_id}")
                 
+        if not os.path.exists('.env.example'):
+          with open('.env.example', 'w', encoding='utf-8') as f:
+              f.write('# Chứng thực cho Shore Bot\n')
+              f.write('BOT_TOKEN=your_discord_token_here\n\n')
+              f.write('# Dropbox API (tính năng backup)\n')
+              f.write('DROPBOX_APP_KEY=your_dropbox_app_key\n')
+              f.write('DROPBOX_APP_SECRET=your_dropbox_app_secret\n')
+              f.write('DROPBOX_REFRESH_TOKEN=your_dropbox_refresh_token\n\n')
+              f.write('# YouTube API (tìm kiếm nhạc)\n')
+              f.write('YOUTUBE_API_KEY=your_youtube_api_key\n\n')
+              f.write('# Spotify API (phát nhạc từ Spotify)\n')
+              f.write('SPOTIFY_CLIENT_ID=your_spotify_client_id\n')
+              f.write('SPOTIFY_CLIENT_SECRET=your_spotify_client_secret\n')
+            
     # Register persistent views for Valorant tournaments
     for guild_id, data in valorant_data.items():
         # If there's an active tournament with score tracking
@@ -5508,7 +5570,7 @@ async def on_ready():
     bot.loop.create_task(daily_stats_task())
     bot.loop.create_task(weekly_stats_task())
     bot.loop.create_task(check_voice_channels())
-    bot.loop.create_task(check_birthdays())  # Thêm task check_birthdays ở đây
+    bot.loop.create_task(cleanup_temp_files()) # Thêm task check_birthdays ở đây
     load_stream_cache()
     bot.add_view(MusicControlView())
     
@@ -5518,11 +5580,12 @@ async def on_ready():
 @bot.event
 async def on_disconnect():
     save_music_queues()
-    save_stream_cache()
-
+    save_stream_cache() 
+    
 
 # ---------------- MAIN ----------------
 try:
+    keep_alive()  # Khởi động server
     bot.run(BOT_TOKEN)
 except Exception as e:
     print(f"Lỗi khi chạy bot: {e}")
